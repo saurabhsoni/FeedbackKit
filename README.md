@@ -184,9 +184,23 @@ Tag a release, and each app picks it up when *you* choose:
 git tag 1.1.0 && git push --tags
 ```
 
+In Xcode: **File → Packages → Update to Latest Package Versions**.
+
+From the command line it takes more than you'd expect, and this is worth
+knowing because the obvious command quietly does nothing:
+
 ```bash
+rm -f YourApp.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
+rm -rf ~/Library/Caches/org.swift.swiftpm/repositories/FeedbackKit-*
 xcodebuild -project YourApp.xcodeproj -scheme YourApp -resolvePackageDependencies
 ```
+
+`-resolvePackageDependencies` on its own **honours the existing pin** — it
+resolves what `Package.resolved` already says rather than looking for anything
+newer. And even after deleting the pin, SPM serves a cached clone of the repo
+that predates your new tag, so it re-resolves to the *same old version* and
+looks like the tag never landed. Both lines above are needed. Then commit the
+updated `Package.resolved`.
 
 `from: "1.0.0"` is what makes syncing *possible*; the committed
 `Package.resolved` is what stops apps drifting on their own. Note that for an
