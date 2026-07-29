@@ -174,6 +174,28 @@ Then just ask: *"show me new feedback for myeverythingapp"*.
 `read_only=true` runs every query as a read-only Postgres user, so an agent
 reading your feedback can't modify it.
 
+### Claude Code skill
+
+A ready-made `/review-feedback` skill lives at
+[`.claude/skills/review-feedback/`](.claude/skills/review-feedback/SKILL.md)
+in this repo — it queries the shared backend directly (no MCP setup needed),
+shows screenshots, and can triage. It's a **global** skill on purpose: which
+app's project you happen to have open shouldn't change how you read feedback
+that spans all of them, so it belongs in `~/.claude/skills/`, not any one
+app's `.claude/skills/`.
+
+On a machine that already has this repo cloned, link it in once:
+
+```bash
+ln -s "$(pwd)/.claude/skills/review-feedback" ~/.claude/skills/review-feedback
+```
+
+From then on, editing the skill here — `git pull`, or a local edit you
+commit — is what keeps every project's `/review-feedback` in sync, the same
+way updating the Swift package keeps every app's feedback *feature* in sync.
+Don't copy the file into an individual app's `.claude/skills/`; that creates
+a second copy that silently drifts.
+
 ---
 
 ## Updating it across apps
