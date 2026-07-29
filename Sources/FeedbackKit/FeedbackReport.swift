@@ -6,9 +6,11 @@ public enum FeedbackCategory: String, Sendable, CaseIterable, Codable {
     case idea
     case general
 
+    /// Kept to one short word each — these sit in a segmented control, which
+    /// truncates rather than wraps.
     public var title: String {
         switch self {
-        case .bug: "Something's broken"
+        case .bug: "Bug"
         case .idea: "Idea"
         case .general: "General"
         }

@@ -29,6 +29,27 @@ public extension View {
         modifier(FeedbackModifier(config: config))
     }
 
+    /// Convenience for `FeedbackConfig.fromInfoPlist(…)`, which is optional.
+    ///
+    /// A `nil` config disables feedback rather than shipping something that
+    /// fails at the network layer. It trips an assertion in debug builds so a
+    /// missing `Secrets.xcconfig` surfaces on the simulator instead of as
+    /// silence from a friend's phone.
+    @available(iOSApplicationExtension, unavailable)
+    @ViewBuilder
+    func feedback(_ config: FeedbackConfig?) -> some View {
+        if let config {
+            modifier(FeedbackModifier(config: config))
+        } else {
+            onAppear {
+                assertionFailure(
+                    "FeedbackKit: no configuration found. Check Secrets.xcconfig "
+                        + "and that the Info.plist keys are being substituted."
+                )
+            }
+        }
+    }
+
     /// Marks a view so its contents are blacked out in automatic screenshots.
     ///
     /// Secure text fields are handled without this. Use it for anything else

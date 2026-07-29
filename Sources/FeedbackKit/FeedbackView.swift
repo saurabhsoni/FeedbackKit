@@ -117,7 +117,7 @@ struct FeedbackView: View {
             if let screenshot = presenter.autoScreenshot, let image = UIImage(data: screenshot) {
                 attachmentRow(
                     image: image,
-                    title: "Screen when you shook",
+                    title: "The screen you were on",
                     subtitle: "Captured automatically",
                     remove: { presenter.removeAutoScreenshot() }
                 )
