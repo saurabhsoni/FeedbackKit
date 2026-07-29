@@ -127,3 +127,18 @@ create or replace view public.feedback_inbox as
   order by created_at desc;
 
 revoke all on public.feedback_inbox from anon, authenticated;
+
+-- ---------------------------------------------------------------------------
+-- 5. Explicit grants for the secret key (service_role)
+-- ---------------------------------------------------------------------------
+--
+-- Supabase normally auto-grants service_role full access to the public
+-- schema. If you unchecked "Automatically expose new tables" when creating
+-- the project (recommended — see README), that blocks service_role too, not
+-- just anon/authenticated. Without this block, reading feedback back with the
+-- secret key 403s with "permission denied for table feedback" even though the
+-- key is correct — confirmed against a live project on 2026-07-29.
+
+grant select, update on public.feedback to service_role;
+grant select on public.feedback_inbox to service_role;
+grant select on storage.objects to service_role;
