@@ -1,0 +1,9 @@
+--swiftversion 6.0
+
+# Don't indent the body of `#if canImport(UIKit)` — most files in this package
+# are wrapped in one end to end, so indenting it buries every declaration a
+# level deep for no benefit.
+--ifdef no-indent
+
+# SwiftLint's default forbids trailing commas in collection literals.
+--trailingcommas never

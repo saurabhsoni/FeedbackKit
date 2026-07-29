@@ -69,15 +69,16 @@ final class ShakeDetector {
     /// roughly rest (1g) before another peak counts, so one continuous shake
     /// reads as one gesture instead of a burst of them.
     private func consider(_ acceleration: CMAcceleration) {
-        let g = sqrt(
+        // Magnitude in g. At rest this reads ~1.0 (gravity alone).
+        let force = sqrt(
             acceleration.x * acceleration.x
                 + acceleration.y * acceleration.y
                 + acceleration.z * acceleration.z
         )
-        if g > 2.3, isSettled {
+        if force > 2.3, isSettled {
             isSettled = false
             fire()
-        } else if g < 1.3 {
+        } else if force < 1.3 {
             isSettled = true
         }
     }
@@ -99,7 +100,9 @@ struct ShakeCatcher: UIViewControllerRepresentable {
     final class Controller: UIViewController {
         var onShake: (@MainActor () -> Void)?
 
-        override var canBecomeFirstResponder: Bool { true }
+        override var canBecomeFirstResponder: Bool {
+            true
+        }
 
         override func viewDidAppear(_ animated: Bool) {
             super.viewDidAppear(animated)
@@ -115,14 +118,14 @@ struct ShakeCatcher: UIViewControllerRepresentable {
         }
     }
 
-    func makeUIViewController(context: Context) -> Controller {
+    func makeUIViewController(context _: Context) -> Controller {
         let controller = Controller()
         controller.onShake = onShake
         controller.view.isUserInteractionEnabled = false
         return controller
     }
 
-    func updateUIViewController(_ controller: Controller, context: Context) {
+    func updateUIViewController(_ controller: Controller, context _: Context) {
         controller.onShake = onShake
     }
 }

@@ -33,7 +33,7 @@ enum ImagePrep {
                 // Bakes the EXIF orientation into the pixels.
                 kCGImageSourceCreateThumbnailWithTransform: true,
                 kCGImageSourceShouldCacheImmediately: true,
-                kCGImageSourceThumbnailMaxPixelSize: maxPixel,
+                kCGImageSourceThumbnailMaxPixelSize: maxPixel
             ] as CFDictionary)
         else { return nil }
         // `source` must not escape this function — CGImageSource is not Sendable.
@@ -45,13 +45,15 @@ enum ImagePrep {
         for _ in 0 ..< 6 {
             guard let encoded = encode(thumbnail, quality: quality) else { break }
             best = encoded
-            if encoded.count <= targetBytes || quality < 0.35 { break }
+            if encoded.count <= targetBytes || quality < 0.35 {
+                break
+            }
             quality -= 0.12
         }
         return best
     }
 
-    nonisolated private static func encode(_ image: CGImage, quality: CGFloat) -> Data? {
+    private nonisolated static func encode(_ image: CGImage, quality: CGFloat) -> Data? {
         let output = NSMutableData()
         guard let destination = CGImageDestinationCreateWithData(
             output, UTType.jpeg.identifier as CFString, 1, nil

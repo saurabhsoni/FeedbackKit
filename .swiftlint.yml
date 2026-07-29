@@ -1,0 +1,12 @@
+# `os` and `id` are meaningful names in this domain, not abbreviations to expand.
+identifier_name:
+  min_length: 2
+  excluded: [id, os]
+
+# FeedbackReport.Attachment.Origin is two deep, which is exactly where it
+# belongs — the alternative is a top-level type nobody else can use.
+nesting:
+  type_level: 2
+
+excluded:
+  - .build

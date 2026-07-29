@@ -83,7 +83,9 @@ public final class FeedbackPresenter {
             get: { self.isPresented },
             set: { newValue in
                 self.isPresented = newValue
-                if !newValue { self.reset() }
+                if !newValue {
+                    self.reset()
+                }
             }
         )
     }

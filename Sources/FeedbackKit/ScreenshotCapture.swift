@@ -38,13 +38,19 @@ enum ScreenshotCapture {
         format.preferredRange = .standard
 
         let image = UIGraphicsImageRenderer(bounds: bounds, format: format).image { context in
+            // `drawHierarchy` is the only API Apple documents as capturing
+            // regardless of drawing technique (UIKit, Quartz, SpriteKit).
+            // `afterScreenUpdates: false` captures the frame as committed right
+            // now — `true` would flush a pending CoreAnimation transaction and
+            // can pull a presenting sheet into the shot.
+            //
+            // It still can't capture hardware-composited layers (AVPlayerLayer,
+            // camera preview): those are composited out of process and come out
+            // black on device, though not in the Simulator. Falling back to
+            // `layer.render` keeps a degraded shot rather than nothing.
             for window in windows {
-                // `drawHierarchy` is the only API Apple documents as capturing
-                // regardless of drawing technique (UIKit, Quartz, SpriteKit).
-                // `afterScreenUpdates: false` captures the frame as committed
-                // right now — `true` would flush a pending CoreAnimation
-                // transaction and can pull a presenting sheet into the shot.
-                if !window.drawHierarchy(in: window.bounds, afterScreenUpdates: false) {
+                let drawn = window.drawHierarchy(in: window.bounds, afterScreenUpdates: false)
+                if !drawn {
                     window.layer.render(in: context.cgContext)
                 }
             }
@@ -84,7 +90,9 @@ enum ScreenshotCapture {
         into rects: inout [CGRect],
         relativeTo base: UIWindow
     ) {
-        if view.isHidden || view.alpha == 0 { return }
+        if view.isHidden || view.alpha == 0 {
+            return
+        }
 
         let isSecureField = (view as? UITextField)?.isSecureTextEntry == true
         if isSecureField || view.feedbackIsRedacted {

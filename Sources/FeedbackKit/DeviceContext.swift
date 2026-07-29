@@ -73,6 +73,9 @@ struct DeviceContext: Sendable, Codable, Equatable {
         var info = utsname()
         uname(&info)
         return withUnsafeBytes(of: info.machine) { raw in
+            // Not a Data->String conversion: this is a raw buffer slice, so
+            // `String(decoding:as:)` is right and cannot fail.
+            // swiftlint:disable:next optional_data_string_conversion
             String(decoding: raw.prefix { $0 != 0 }, as: UTF8.self)
         }
     }
@@ -92,7 +95,7 @@ struct DeviceContext: Sendable, Codable, Equatable {
             "iPhone16,1": "iPhone 15 Pro", "iPhone16,2": "iPhone 15 Pro Max",
             "iPhone17,3": "iPhone 16", "iPhone17,4": "iPhone 16 Plus",
             "iPhone17,1": "iPhone 16 Pro", "iPhone17,2": "iPhone 16 Pro Max",
-            "iPhone17,5": "iPhone 16e",
+            "iPhone17,5": "iPhone 16e"
         ]
         return known[identifier]
     }

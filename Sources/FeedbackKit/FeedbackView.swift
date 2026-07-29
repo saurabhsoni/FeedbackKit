@@ -159,7 +159,10 @@ struct FeedbackView: View {
             Text("Attachments")
         } footer: {
             if presenter.autoScreenshot != nil {
-                Text("Password fields are blacked out automatically. Remove the screenshot if you'd rather not send it.")
+                Text(
+                    "Password fields are blacked out automatically. "
+                        + "Remove the screenshot if you'd rather not send it."
+                )
             }
         }
     }

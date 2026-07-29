@@ -32,7 +32,7 @@ struct SupabaseTransport: FeedbackTransport {
         // than a row pointing at objects that were never uploaded.
         var paths: [String] = []
         for attachment in report.attachments {
-            paths.append(try await upload(attachment, appID: report.appID))
+            try await paths.append(upload(attachment, appID: report.appID))
         }
         try await insertRow(report, screenshotPaths: paths)
     }
@@ -76,14 +76,14 @@ struct SupabaseTransport: FeedbackTransport {
         applyAuth(to: &request)
 
         let row = Row(
-            app_id: report.appID,
-            app_version: report.appVersion,
-            build_number: report.buildNumber,
+            appID: report.appID,
+            appVersion: report.appVersion,
+            buildNumber: report.buildNumber,
             body: report.body,
             category: report.category.rawValue,
             screenshots: screenshotPaths,
             reporter: report.reporter,
-            device_id: report.deviceID,
+            deviceID: report.deviceID,
             device: report.device
         )
         request.httpBody = try JSONEncoder().encode(row)
@@ -94,15 +94,28 @@ struct SupabaseTransport: FeedbackTransport {
     /// Mirrors the insertable column grant in `setup.sql` exactly. The triage
     /// columns are absent because the shipped key cannot write them.
     private struct Row: Encodable {
-        let app_id: String
-        let app_version: String
-        let build_number: String
+        let appID: String
+        let appVersion: String
+        let buildNumber: String
         let body: String
         let category: String
         let screenshots: [String]
         let reporter: String?
-        let device_id: String
+        let deviceID: String
         let device: DeviceContext
+
+        /// Postgres column names, which are snake_case.
+        enum CodingKeys: String, CodingKey {
+            case appID = "app_id"
+            case appVersion = "app_version"
+            case buildNumber = "build_number"
+            case body
+            case category
+            case screenshots
+            case reporter
+            case deviceID = "device_id"
+            case device
+        }
     }
 
     // MARK: - Shared
@@ -148,8 +161,12 @@ struct SupabaseTransport: FeedbackTransport {
             let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return raw.prefix(200).description }
 
-        if let message = object["message"] as? String { return message }
-        if let error = object["error"] as? String { return error }
+        if let message = object["message"] as? String {
+            return message
+        }
+        if let error = object["error"] as? String {
+            return error
+        }
         return raw.prefix(200).description
     }
 }

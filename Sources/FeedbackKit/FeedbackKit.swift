@@ -158,8 +158,8 @@ public struct OpenFeedbackAction: Sendable {
 }
 
 private struct OpenFeedbackKey: EnvironmentKey {
-    // Defaults to a no-op rather than a crash: a view that offers a feedback
-    // button shouldn't take the app down when previewed outside `.feedback(_:)`.
+    /// Defaults to a no-op rather than a crash: a view that offers a feedback
+    /// button shouldn't take the app down when previewed outside `.feedback(_:)`.
     static let defaultValue = OpenFeedbackAction(handler: nil)
 }
 
@@ -168,14 +168,14 @@ private struct OpenFeedbackKey: EnvironmentKey {
 /// An invisible view that tags its SwiftUI-created superview as redacted, so
 /// `ScreenshotCapture` can paint over it.
 private struct RedactionMarker: UIViewRepresentable {
-    func makeUIView(context: Context) -> UIView {
+    func makeUIView(context _: Context) -> UIView {
         let view = MarkerView()
         view.isUserInteractionEnabled = false
         view.backgroundColor = .clear
         return view
     }
 
-    func updateUIView(_ view: UIView, context: Context) {}
+    func updateUIView(_: UIView, context _: Context) {}
 
     private final class MarkerView: UIView {
         override func didMoveToWindow() {

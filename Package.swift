@@ -7,7 +7,7 @@ let package = Package(
     // without forcing their deployment target up. Nothing here needs a later SDK.
     platforms: [.iOS(.v17)],
     products: [
-        .library(name: "FeedbackKit", targets: ["FeedbackKit"]),
+        .library(name: "FeedbackKit", targets: ["FeedbackKit"])
     ],
     targets: [
         .target(
@@ -21,7 +21,7 @@ let package = Package(
             name: "FeedbackKitTests",
             dependencies: ["FeedbackKit"],
             swiftSettings: [.swiftLanguageMode(.v6)]
-        ),
+        )
     ],
     swiftLanguageModes: [.v6]
 )
