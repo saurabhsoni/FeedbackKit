@@ -1,5 +1,5 @@
 #!/bin/bash
-# Weekly local check for new FeedbackKit reports. Runs via a LaunchAgent
+# Daily local check for new FeedbackKit reports. Runs via a LaunchAgent
 # (see ~/Library/LaunchAgents/in.saurabhsoni.feedbackkit.check.plist) because
 # it needs the secret key from this Mac's login keychain — that key can never
 # leave this machine, so this check cannot run as a cloud routine.
