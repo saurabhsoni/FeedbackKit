@@ -33,6 +33,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -313,6 +314,12 @@ class App:
         self.ship = spec.get("ship")
         self.build_number = spec.get("buildNumber")
         self.context_hint = spec.get("contextHint", "")
+        # Files the build needs that git deliberately does not track — an
+        # xcconfig of API keys, a local .env. A fresh worktree contains only
+        # tracked files, so without this the very first command fails: for
+        # LifeApp, `xcodegen generate` exits 1 with "invalid config file path"
+        # because Secrets.xcconfig isn't there.
+        self.worktree_seed = spec.get("worktreeSeed", [])
         # Build commands differ per app, so each app declares what its
         # implementing agent may run on top of the base set.
         self.extra_tools = spec.get("allowedTools", [])
@@ -326,6 +333,25 @@ class App:
 
     def allowed_tools(self) -> str:
         return ",".join(BASE_ALLOWED_TOOLS + list(self.extra_tools))
+
+    def seed_worktree(self, worktree: Path) -> None:
+        """Link the untracked files the build needs into a fresh worktree.
+
+        Symlinks rather than copies: a secret should exist in one place, and a
+        stale copy of an xcconfig is a genuinely confusing failure. They are
+        gitignored in the worktree too, so they never reach a commit.
+        """
+        for relative in self.worktree_seed:
+            source = self.repo / relative
+            if not source.exists():
+                log(f"  seed '{relative}' not in the checkout - skipping")
+                continue
+            target = worktree / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists() or target.is_symlink():
+                continue
+            target.symlink_to(source)
+            log(f"  seeded {relative}")
 
 
 def discover_apps(config: dict) -> dict:
@@ -354,30 +380,41 @@ def run_logged(cmd: list, cwd: Path, log_path: Path, timeout: int,
 
     start_new_session so a timeout can take down the whole process tree —
     xcodebuild and claude both spawn children that outlive a bare kill()."""
+    timed_out = False
     with open(log_path, "a", encoding="utf-8") as handle:
         handle.write(f"\n$ {' '.join(cmd[:3])} ...\n")
         handle.flush()
+        start = handle.tell()
         try:
+            # Stream straight into the log rather than through a pipe. With
+            # stdout=PIPE the buffered output dies with the process, so a
+            # timeout left behind a log that said only "TIMEOUT after 1200s" —
+            # no way to tell a wedged build from a slow one. Learned the hard
+            # way on the first real run.
             process = subprocess.Popen(
-                cmd, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                cmd, cwd=str(cwd), stdout=handle, stderr=subprocess.STDOUT,
                 text=True, start_new_session=True, env=env,
             )
         except OSError as exc:
             handle.write(f"failed to start: {exc}\n")
             return 127, str(exc)
         try:
-            output, _ = process.communicate(timeout=timeout)
+            process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
+            timed_out = True
             try:
                 os.killpg(os.getpgid(process.pid), signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
                 pass
             process.wait(timeout=30)
-            handle.write(f"TIMEOUT after {timeout}s\n")
-            return 124, "timed out"
-        if output:
-            handle.write(output)
-        return process.returncode, output or ""
+            handle.write(f"\nTIMEOUT after {timeout}s\n")
+    try:
+        with open(log_path, encoding="utf-8", errors="replace") as reader:
+            reader.seek(start)
+            output = reader.read()
+    except OSError:
+        output = ""
+    return (124 if timed_out else process.returncode), output
 
 
 def git(repo: Path, *args: str, check: bool = True):
@@ -428,7 +465,33 @@ def parse_claude_json(raw: str):
                 return json.loads(fenced.group(1))
             except json.JSONDecodeError:
                 pass
-    return {"summary": inner.strip()[:500], "succeeded": True, "_unstructured": True}
+    # Unparseable. Fail closed: `succeeded` must never default to True here,
+    # because the CLI reports its own errors in this same field — a run that
+    # died with "Not logged in" would otherwise be merged as a success whose
+    # reporter-facing note is an error message.
+    return {"summary": inner.strip()[:500], "succeeded": False, "_unstructured": True}
+
+
+def run_claude(cmd: list, cwd: Path, log_path: Path, timeout: int, attempts: int = 1):
+    """Run the CLI, optionally retrying a transient failure.
+
+    Seen on the first real run: an expired OAuth token makes the *first*
+    invocation of a tick return exit 1 with `Not logged in`, `duration_api_ms`
+    0 and no API call attempted, while the very next invocation — after the
+    refresh that first one triggered — succeeds. Retrying is only safe for
+    read-only calls, so `attempts` is opt-in rather than the default; a failed
+    implement is retried at the item level instead, where it gets a clean
+    worktree rather than inheriting half-finished edits.
+    """
+    code, output = 1, ""
+    for attempt in range(attempts):
+        code, output = run_logged(cmd, cwd, log_path, timeout, env=os.environ.copy())
+        if code == 0:
+            return code, output
+        if attempt + 1 < attempts:
+            log(f"  claude exited {code} - retrying once in 10s")
+            time.sleep(10)
+    return code, output
 
 
 def classify(app: App, item: dict, claude: str, log_path: Path) -> dict:
@@ -462,11 +525,17 @@ def classify(app: App, item: dict, claude: str, log_path: Path) -> dict:
         "--setting-sources", "user",
         "--max-budget-usd", "1",
     ]
-    code, output = run_logged(cmd, app.repo, log_path, CLASSIFY_TIMEOUT, env=os.environ.copy())
+    # Read-only, so retrying is free of side effects — and worth it: losing
+    # this call silently downgrades every job to 'small', which is the one
+    # failure here that produces a plausible-looking result rather than an
+    # error. A `large` change quietly implemented at 'small' is worse than a
+    # crash, because nothing in the log says the model choice was wrong.
+    code, output = run_claude(cmd, app.repo, log_path, CLASSIFY_TIMEOUT, attempts=2)
     parsed = parse_claude_json(output) if code == 0 else None
     tier = (parsed or {}).get("complexity")
     if tier not in TIERS:
-        log(f"  classify unusable (exit {code}) - assuming 'small'")
+        detail = (parsed or {}).get("summary") or (output or "").strip()[-200:]
+        log(f"  classify unusable (exit {code}) - assuming 'small': {detail[:200]}")
         return {"complexity": "small", "restatement": item.get("body", "")[:1000]}
     return {
         "complexity": tier,
@@ -660,6 +729,7 @@ def process(supabase: Supabase, app: App, item: dict, config: dict, claude: str)
         git(app.repo, "worktree", "prune", check=False)
         git(app.repo, "branch", "-D", branch, check=False)
         git(app.repo, "worktree", "add", "-b", branch, str(worktree), app.default_branch)
+        app.seed_worktree(worktree)
 
         result = implement(app, item, plan, worktree, claude, log_path)
         if not result or not result.get("succeeded", False):
