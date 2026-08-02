@@ -194,11 +194,34 @@ def now_iso() -> str:
 
 
 def keychain(service: str) -> str:
-    result = subprocess.run(
-        ["security", "find-generic-password", "-s", service, "-w"],
-        capture_output=True, text=True, timeout=15,
-    )
-    return result.stdout.strip() if result.returncode == 0 else ""
+    """Read one secret, refusing to wait forever for it.
+
+    `security` blocks indefinitely when the login keychain wants a password —
+    it is waiting for a dialog that, under launchd, nobody will ever see. A
+    plain `subprocess.run(timeout=...)` is not enough: on timeout it kills the
+    child and then calls communicate(), which itself blocks if the doomed
+    process left a grandchild holding the pipe. Own the process group so the
+    whole thing can be taken down, and treat the hang as a missing secret so
+    the tick fails loudly instead of wedging until the next reboot.
+    """
+    try:
+        process = subprocess.Popen(
+            ["security", "find-generic-password", "-s", service, "-w"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, start_new_session=True,
+        )
+    except OSError:
+        return ""
+    try:
+        out, _ = process.communicate(timeout=15)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        log(f"keychain read for '{service}' timed out - is the login keychain locked?")
+        return ""
+    return out.strip() if process.returncode == 0 else ""
 
 
 def load_config() -> dict:
