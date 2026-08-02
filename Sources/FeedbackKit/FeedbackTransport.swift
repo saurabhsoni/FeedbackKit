@@ -8,6 +8,13 @@ import Foundation
 protocol FeedbackTransport: Sendable {
     /// Uploads attachments, then writes the row. Throws `FeedbackError`.
     func send(_ report: FeedbackReport) async throws
+
+    /// Reads back what one install has sent, newest first. Throws `FeedbackError`.
+    ///
+    /// Writing and reading are one protocol rather than two because they are
+    /// one backend: a conformance that can insert a report but cannot say what
+    /// became of it would only push the problem to the caller.
+    func history(appID: String, deviceID: String) async throws -> [FeedbackHistoryItem]
 }
 
 /// Supabase implementation: PostgREST for the row, Storage for the images.
@@ -81,6 +88,7 @@ struct SupabaseTransport: FeedbackTransport {
             buildNumber: report.buildNumber,
             body: report.body,
             category: report.category.rawValue,
+            implementRequested: report.implementRequested,
             screenshots: screenshotPaths,
             reporter: report.reporter,
             deviceID: report.deviceID,
@@ -92,13 +100,16 @@ struct SupabaseTransport: FeedbackTransport {
     }
 
     /// Mirrors the insertable column grant in `setup.sql` exactly. The triage
-    /// columns are absent because the shipped key cannot write them.
+    /// columns are absent because the shipped key cannot write them —
+    /// `implement_requested` is the one exception, granted on its own so the
+    /// app can ask for work without being able to claim any was done.
     private struct Row: Encodable {
         let appID: String
         let appVersion: String
         let buildNumber: String
         let body: String
         let category: String
+        let implementRequested: Bool
         let screenshots: [String]
         let reporter: String?
         let deviceID: String
@@ -111,10 +122,55 @@ struct SupabaseTransport: FeedbackTransport {
             case buildNumber = "build_number"
             case body
             case category
+            case implementRequested = "implement_requested"
             case screenshots
             case reporter
             case deviceID = "device_id"
             case device
+        }
+    }
+
+    // MARK: - Read-back
+
+    func history(appID: String, deviceID: String) async throws -> [FeedbackHistoryItem] {
+        // An RPC rather than a filtered select: with the shipped key there is no
+        // JWT to scope an RLS policy on, so the install ID has to be an argument
+        // the function filters by internally, where the caller can't widen it.
+        let url = config.projectURL.appending(path: "rest/v1/rpc/feedback_for_install")
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 30
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        applyAuth(to: &request)
+        request.httpBody = try Self.historyBody(appID: appID, deviceID: deviceID)
+
+        let data = try await perform(request, describing: "load your feedback")
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = FeedbackHistoryItem.dateDecoding
+        do {
+            return try decoder.decode([FeedbackHistoryItem].self, from: data)
+        } catch {
+            throw FeedbackError.transport("Couldn't read your feedback: \(error.localizedDescription)")
+        }
+    }
+
+    /// PostgREST matches RPC arguments by name, so these keys have to spell
+    /// `feedback_for_install(p_app_id, p_device_id)` exactly. Split out from
+    /// the request so a test can pin the names — getting them wrong is a 404
+    /// at runtime rather than a compile error.
+    static func historyBody(appID: String, deviceID: String) throws -> Data {
+        try JSONEncoder().encode(HistoryArguments(appID: appID, deviceID: deviceID))
+    }
+
+    private struct HistoryArguments: Encodable {
+        let appID: String
+        let deviceID: String
+
+        enum CodingKeys: String, CodingKey {
+            case appID = "p_app_id"
+            case deviceID = "p_device_id"
         }
     }
 
@@ -127,7 +183,11 @@ struct SupabaseTransport: FeedbackTransport {
         request.setValue("Bearer \(config.publishableKey)", forHTTPHeaderField: "Authorization")
     }
 
-    private func perform(_ request: URLRequest, describing action: String) async throws {
+    /// Returns the response body so a reading call can decode it. The two
+    /// write paths ignore it — one error-mapping implementation for all three
+    /// beats a second copy that drifts.
+    @discardableResult
+    private func perform(_ request: URLRequest, describing action: String) async throws -> Data {
         let data: Data
         let response: URLResponse
         do {
@@ -151,6 +211,7 @@ struct SupabaseTransport: FeedbackTransport {
             let detail = String(data: data, encoding: .utf8) ?? ""
             throw FeedbackError.rejected(status: http.statusCode, detail: Self.readable(detail))
         }
+        return data
     }
 
     /// Supabase errors arrive as JSON like `{"message":"...","hint":null}`.

@@ -51,6 +51,51 @@ user only cares about the app in the current project, filter with
 `&app_id=eq.<slug>`, but default to showing everything unless asked to
 narrow it, since new apps get added to the same backend over time.
 
+## What the runner is already doing
+
+A reporter can now tick **"Start implementing this"** when sending a bug or an
+idea. That sets `implement_requested`, and a database trigger queues the row by
+setting `work_state = 'queued'` for a runner to pick up. `feedback_inbox`
+carries the whole of that: `implement_requested`, `work_state`, `work_note`,
+`work_error`, `work_branch`, `work_commit`, `work_attempts`, `work_started_at`,
+`work_updated_at`, `fixed_in_build`, `installed_at`.
+
+**Check this before hand-implementing anything.** A row that is queued but not
+yet claimed still has `status = new`, so it shows up in the query above looking
+like ordinary untouched feedback. If its `work_state` is `working`, a runner
+has it right now — leave it alone rather than duplicating the work or colliding
+with the branch it has open.
+
+If it's `queued` and nothing is moving, that's normal: the runner is a separate
+program and may not be running on this Mac at all. Implementing it by hand is
+fine — just close the queue entry when you're done, or a runner that starts
+later will do it again:
+
+```bash
+curl -s -X PATCH "https://$REF.supabase.co/rest/v1/feedback?id=eq.<uuid>" \
+  -H "apikey: $KEY" -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"status":"done","work_state":"implemented","fixed_in_build":"<build>",
+       "work_note":"<one plain sentence for the reporter>",
+       "notes":"<private detail>"}'
+```
+
+`fixed_in_build` is the `CURRENT_PROJECT_VERSION` the fix first landed in. The
+app compares it against the build the person is running, so it's what turns
+*Ready in the next update* into *Live in this version* on their screen. Leave it
+out and the item is stuck at "ready" forever.
+
+```bash
+curl -s "https://$REF.supabase.co/rest/v1/feedback_inbox?work_state=in.(queued,needs_approval,working,failed)&order=created_at.desc&select=id,app_id,created_at,category,body,status,work_state,work_note,work_error,work_branch,work_attempts,fixed_in_build" \
+  -H "apikey: $KEY" -H "Authorization: Bearer $KEY" | jq .
+```
+
+Read it as: `queued` waiting for a runner, `needs_approval` claimed but wanting
+a human yes, `working` in flight right now, `failed` tried and didn't survive
+verification, `implemented` merged with a build number in `fixed_in_build`,
+`declined` not going to be done. For everything ever asked for, including what
+already landed, swap the filter for `implement_requested=is.true`.
+
 ## Screenshots
 
 The bucket is private, so images need the secret key too. Paths come from the
@@ -92,6 +137,51 @@ curl -s -X PATCH "https://$REF.supabase.co/rest/v1/feedback?id=eq.<uuid>" \
 ```
 
 Statuses: `new`, `triaged`, `in_progress`, `done`, `wontfix`.
+
+### Two status columns, and how they relate
+
+`status` is still the human triage column and still means what it always did —
+it is what you write when you've dealt with something. `work_state` is the
+automation's lifecycle and belongs to the runner; don't set it by hand unless
+you're deliberately steering the queue (`declined` to call something off,
+`queued` to hand a row over).
+
+The runner keeps `status` in step as it goes: `in_progress` while working,
+`done` once implemented, `triaged` on failure — deliberately not `wontfix`,
+because a failed attempt is still something to look at. That's why the
+`status=eq.new` query at the top of this file keeps behaving: anything the
+runner has touched has already left `new`.
+
+### `work_note` is read by the reporter
+
+`work_note` is **displayed inside the app**, on the person's own "Your feedback"
+list. `notes` is private triage and is never returned to any client.
+
+So if you write `work_note`, write it for them: one plain sentence, past tense,
+no file paths, no symbol names, no branch names, no jargon.
+
+- Good: `Added a Clear button to the note sheet.`
+- Good: `This one turned out to be two separate problems — splitting it up.`
+- Bad: `Fixed in CheckInSlideRow.swift, see feedback/abc123.`
+
+Everything else you'd want to say goes in `notes`.
+
+## When something failed
+
+`work_state = 'failed'` means the attempt ran and didn't survive verification.
+Three places to look, in order:
+
+1. **`work_error`** — the tail of the run log, which is usually the compiler or
+   lint error itself and often enough on its own.
+2. **`work_branch`** — the branch was deliberately kept rather than deleted, so
+   the half-finished work is there to inspect: `git log`/`git diff` it against
+   the default branch before deciding whether to salvage or start over.
+3. **`~/.feedbackkit/runs/`** — the full transcript of the run, when the tail in
+   `work_error` isn't enough.
+
+`work_attempts` tells you whether this has failed repeatedly. More than one or
+two failures on the same item usually means the request is ambiguous rather than
+hard — the useful move is to go back to what the reporter said, not to retry.
 
 ## Note on the free plan
 

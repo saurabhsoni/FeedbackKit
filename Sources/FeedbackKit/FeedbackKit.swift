@@ -73,11 +73,24 @@ private struct FeedbackModifier: ViewModifier {
         content
             .environment(presenter)
             .environment(\.openFeedback, OpenFeedbackAction { presenter.present() })
+            .environment(\.openFeedbackHistory, OpenFeedbackHistoryAction { presenter.presentHistory() })
             .background(ShakeCatcher { presenter.present() })
-            .sheet(isPresented: presenter.presentationBinding) {
-                FeedbackView()
-                    .environment(presenter)
-            }
+            // One `.sheet(item:)` for both screens, deliberately. Two chained
+            // `.sheet(isPresented:)` on the same view is a long-standing
+            // SwiftUI trap: the second is simply never presented.
+            .sheet(
+                item: presenter.routeBinding,
+                onDismiss: { presenter.sheetDidDismiss() },
+                content: { route in
+                    switch route {
+                    case .compose:
+                        FeedbackView()
+                            .environment(presenter)
+                    case .history:
+                        FeedbackHistoryView(store: presenter.history)
+                    }
+                }
+            )
             .onChange(of: scenePhase, initial: true) { _, phase in
                 // Drain the offline queue whenever the app comes forward. A
                 // background URLSession would be more thorough, but only the
@@ -126,6 +139,39 @@ public extension FeedbackButton where Label == SwiftUI.Label<Text, Image> {
     }
 }
 
+/// The companion row: what you already sent, and what became of it.
+///
+/// ```swift
+/// Section {
+///     FeedbackButton()
+///     FeedbackHistoryButton()
+/// }
+/// ```
+@available(iOSApplicationExtension, unavailable)
+public struct FeedbackHistoryButton<Label: View>: View {
+    @Environment(FeedbackPresenter.self) private var presenter
+    private let label: Label
+
+    public init(@ViewBuilder label: () -> Label) {
+        self.label = label()
+    }
+
+    public var body: some View {
+        Button {
+            presenter.presentHistory()
+        } label: {
+            label
+        }
+    }
+}
+
+@available(iOSApplicationExtension, unavailable)
+public extension FeedbackHistoryButton where Label == SwiftUI.Label<Text, Image> {
+    init(_ title: String = "Your Feedback", systemImage: String = "tray.full") {
+        self.init { SwiftUI.Label(title, systemImage: systemImage) }
+    }
+}
+
 public extension EnvironmentValues {
     /// Opens the feedback sheet from anywhere inside `.feedback(_:)`.
     ///
@@ -137,6 +183,12 @@ public extension EnvironmentValues {
     var openFeedback: OpenFeedbackAction {
         get { self[OpenFeedbackKey.self] }
         set { self[OpenFeedbackKey.self] = newValue }
+    }
+
+    /// Opens the list of this install's own reports.
+    var openFeedbackHistory: OpenFeedbackHistoryAction {
+        get { self[OpenFeedbackHistoryKey.self] }
+        set { self[OpenFeedbackHistoryKey.self] = newValue }
     }
 }
 
@@ -161,6 +213,24 @@ private struct OpenFeedbackKey: EnvironmentKey {
     /// Defaults to a no-op rather than a crash: a view that offers a feedback
     /// button shouldn't take the app down when previewed outside `.feedback(_:)`.
     static let defaultValue = OpenFeedbackAction(handler: nil)
+}
+
+/// Not `@MainActor` for the same reason as `OpenFeedbackAction` — see there.
+public struct OpenFeedbackHistoryAction: Sendable {
+    private let handler: (@MainActor @Sendable () -> Void)?
+
+    init(handler: (@MainActor @Sendable () -> Void)?) {
+        self.handler = handler
+    }
+
+    @MainActor
+    public func callAsFunction() {
+        handler?()
+    }
+}
+
+private struct OpenFeedbackHistoryKey: EnvironmentKey {
+    static let defaultValue = OpenFeedbackHistoryAction(handler: nil)
 }
 
 // MARK: - Redaction plumbing

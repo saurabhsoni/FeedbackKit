@@ -76,6 +76,19 @@ struct FeedbackView: View {
                 Text("Be as specific as you like — what you expected, and what happened instead.")
             }
 
+            // Its own section, immediately under the words: this is part of
+            // *what am I asking for*, not metadata about the report.
+            if offersImplementToggle {
+                Section {
+                    Toggle("Start implementing this", isOn: $presenter.implementRequested)
+                } footer: {
+                    Text(
+                        "Sends it straight to the workshop instead of waiting for review. "
+                            + "Follow along under Your feedback."
+                    )
+                }
+            }
+
             attachmentsSection
 
             Section {
@@ -90,6 +103,12 @@ struct FeedbackView: View {
 
             contextSection
 
+            Section {
+                Button("Your feedback") {
+                    presenter.replaceSheet(with: .history)
+                }
+            }
+
             if case let .failed(message) = presenter.state {
                 Section {
                     Label(message, systemImage: "exclamationmark.triangle")
@@ -99,7 +118,21 @@ struct FeedbackView: View {
             }
         }
         .listStyle(.insetGrouped)
+        .animation(.default, value: presenter.category)
+        .onChange(of: presenter.category) { _, _ in
+            // A toggle the user can no longer see must not still be on when
+            // they hit Send.
+            if !offersImplementToggle {
+                presenter.implementRequested = false
+            }
+        }
         .onAppear { bodyFocused = true }
+    }
+
+    /// Only a bug or an idea is something that can be *built*. A general
+    /// remark isn't implementable, so the offer isn't made for it.
+    private var offersImplementToggle: Bool {
+        presenter.category == .bug || presenter.category == .idea
     }
 
     private var placeholder: String {
@@ -246,6 +279,12 @@ struct FeedbackView: View {
             Button("Done") { dismiss() }
                 .buttonStyle(.borderedProminent)
                 .padding(.top, 8)
+            // Right after sending is when someone most wants to see the queue
+            // they just joined.
+            Button("Your feedback") {
+                presenter.replaceSheet(with: .history)
+            }
+            .font(.subheadline)
         }
         .padding(32)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -253,6 +292,10 @@ struct FeedbackView: View {
             // Long enough to register, short enough not to feel like a modal
             // the user has to dismiss.
             try? await Task.sleep(for: .seconds(1.6))
+            // The sleep also ends when this view goes away — which it does the
+            // moment someone taps through to history. Dismissing then would be
+            // a stale action fired at whatever is on screen instead.
+            guard !Task.isCancelled else { return }
             dismiss()
         }
     }

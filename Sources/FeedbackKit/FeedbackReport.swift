@@ -37,6 +37,10 @@ struct FeedbackReport: Sendable, Codable, Identifiable {
     let buildNumber: String
     let body: String
     let category: FeedbackCategory
+    /// Whether the reporter asked for this to be worked on straight away. The
+    /// app can only ever set the flag — the queue entry it implies is created
+    /// server-side, since `work_state` is not a column the shipped key can write.
+    let implementRequested: Bool
     let reporter: String?
     let deviceID: String
     let device: DeviceContext
@@ -63,6 +67,7 @@ struct FeedbackReport: Sendable, Codable, Identifiable {
         buildNumber: String,
         body: String,
         category: FeedbackCategory,
+        implementRequested: Bool = false,
         reporter: String?,
         deviceID: String,
         device: DeviceContext,
@@ -75,6 +80,7 @@ struct FeedbackReport: Sendable, Codable, Identifiable {
         self.buildNumber = buildNumber
         self.body = body
         self.category = category
+        self.implementRequested = implementRequested
         self.reporter = reporter
         self.deviceID = deviceID
         self.device = device

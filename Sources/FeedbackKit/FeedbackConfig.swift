@@ -82,3 +82,16 @@ public struct FeedbackConfig: Sendable, Equatable {
         return "This app"
     }
 }
+
+extension Bundle {
+    /// Reads a string out of the **host app's** Info.plist.
+    ///
+    /// `Bundle.main`, never `Bundle.module` — the latter is the package's own
+    /// resource bundle with a generated Info.plist, and carries the package's
+    /// version rather than the host app's. Shared because the version and build
+    /// number are wanted in three places: on a report, in the sheet's "Also
+    /// sent" row, and as the yardstick for "is this fix live for me yet".
+    static func mainInfoString(_ key: String) -> String {
+        Bundle.main.object(forInfoDictionaryKey: key) as? String ?? "unknown"
+    }
+}
