@@ -9,6 +9,7 @@ import SwiftUI
 struct FeedbackHistoryView: View {
     let store: FeedbackHistoryStore
 
+    @Environment(FeedbackPresenter.self) private var presenter
     @Environment(\.dismiss) private var dismiss
 
     /// The yardstick for "live for you": the build actually running right now.
@@ -17,7 +18,7 @@ struct FeedbackHistoryView: View {
     var body: some View {
         NavigationStack {
             content
-                .navigationTitle("Your feedback")
+                .navigationTitle("Your previous feedback")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .topBarTrailing) {
@@ -25,7 +26,12 @@ struct FeedbackHistoryView: View {
                     }
                 }
         }
-        .task { await store.load() }
+        .task {
+            await store.load()
+            // After the load, not before: whatever the fetch turned up, they
+            // are looking straight at it, so the badge has done its job.
+            store.markSeen()
+        }
     }
 
     @ViewBuilder
@@ -56,7 +62,10 @@ struct FeedbackHistoryView: View {
             }
         }
         .listStyle(.insetGrouped)
-        .refreshable { await store.refresh() }
+        .refreshable {
+            await store.refresh()
+            store.markSeen()
+        }
     }
 
     private func failure(_ message: String) -> some View {
@@ -92,16 +101,46 @@ struct FeedbackHistoryView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Text(item.body)
-                .lineLimit(4)
+            // The server-written title leads when there is one, and demotes the
+            // body to context. Without one the body *is* the row, which is why
+            // its line limit changes rather than the title being faked locally.
+            if let title = item.title, !title.isEmpty {
+                Text(title)
+                    .fontWeight(.medium)
+                Text(item.body)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            } else {
+                Text(item.body)
+                    .lineLimit(4)
+            }
 
             if let detail = item.detail, !detail.isEmpty {
                 Text(detail)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
+
+            if item.needsClarification {
+                Button("Edit and resend") {
+                    presenter.presentClarification(of: item)
+                }
+                .font(.footnote.weight(.semibold))
+                // `.borderless` is load-bearing in a `List`: the default row
+                // style hands the whole row's tap area to a single button
+                // inside it, so without this, tapping anywhere on the row —
+                // including the text someone is trying to read — reopens the
+                // compose sheet.
+                .buttonStyle(.borderless)
+                .padding(.top, 2)
+            }
         }
         .padding(.vertical, 2)
+        // A replaced report is kept rather than hidden — seeing what you sent
+        // before is half of understanding why the new one reads differently —
+        // but it should not compete with the live one for attention.
+        .opacity(item.state == .superseded ? 0.55 : 1)
     }
 }
 
@@ -112,7 +151,10 @@ private struct StatusPill: View {
     let state: FeedbackHistoryItem.DisplayState
 
     var body: some View {
-        Text(title)
+        // The words live on `DisplayState` rather than here, because the status
+        // notification has to say exactly the same thing and two copies of a
+        // vocabulary drift the moment one of them is reworded.
+        Text(state.title)
             .font(.caption2.weight(.semibold))
             .foregroundStyle(tint)
             .padding(.horizontal, 8)
@@ -120,27 +162,18 @@ private struct StatusPill: View {
             .background(tint.opacity(0.15), in: Capsule())
     }
 
-    /// Written from the reporter's side of the exchange: what this means for
-    /// them, not what column it came out of.
-    private var title: String {
-        switch state {
-        case .received: "Received"
-        case .queued: "Queued"
-        case .working: "Being worked on"
-        case .implemented: "Ready in the next update"
-        case .live: "Live in this version"
-        case .failed: "Needs a closer look"
-        case .notPlanned: "Not planned"
-        }
-    }
-
     private var tint: Color {
         switch state {
-        case .received, .queued, .notPlanned: .secondary
+        // `superseded` sits with the other quiet ones on purpose: being
+        // replaced is not a verdict on the report, it is bookkeeping.
+        case .received, .queued, .notPlanned, .superseded: .secondary
         case .working: .blue
         case .implemented: .orange
         case .live: .green
         case .failed: .red
+        // The one row with something for the reporter to do, so it gets the
+        // one colour nothing else uses.
+        case .unclear: .yellow
         }
     }
 }

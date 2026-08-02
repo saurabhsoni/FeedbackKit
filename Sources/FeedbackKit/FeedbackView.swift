@@ -1,5 +1,4 @@
 #if canImport(UIKit)
-import PhotosUI
 import SwiftUI
 
 /// The feedback sheet.
@@ -7,7 +6,6 @@ struct FeedbackView: View {
     @Environment(FeedbackPresenter.self) private var presenter
     @Environment(\.dismiss) private var dismiss
 
-    @State private var pickerItems: [PhotosPickerItem] = []
     @FocusState private var bodyFocused: Bool
 
     var body: some View {
@@ -49,10 +47,30 @@ struct FeedbackView: View {
         @Bindable var presenter = presenter
 
         return List {
+            if let question = presenter.clarifyingQuestion, presenter.clarifies != nil {
+                clarificationSection(question)
+            }
+
             Section {
+                // `selectable`, not `allCases` — `general` is still a word this
+                // build understands, but not one it offers.
                 Picker("Kind", selection: $presenter.category) {
-                    ForEach(FeedbackCategory.allCases, id: \.self) { category in
+                    ForEach(FeedbackCategory.selectable, id: \.self) { category in
                         Text(category.title).tag(category)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+
+                // Tagged by severity value, never by position: the labels are a
+                // function of the category, so switching Bug to Idea rewrites
+                // all three words. Tagging by index would make the selection
+                // jump; tagging by value leaves "the middle one" the middle one.
+                // The label is invisible under `.segmented` but read aloud,
+                // which is the only place the question gets asked in words.
+                Picker(severityPrompt, selection: $presenter.severity) {
+                    ForEach(FeedbackSeverity.allCases, id: \.self) { severity in
+                        Text(severity.title(for: presenter.category)).tag(severity)
                     }
                 }
                 .pickerStyle(.segmented)
@@ -82,29 +100,33 @@ struct FeedbackView: View {
                 Section {
                     Toggle("Start implementing this", isOn: $presenter.implementRequested)
                 } footer: {
-                    Text(
-                        "Sends it straight to the workshop instead of waiting for review. "
-                            + "Follow along under Your feedback."
-                    )
+                    Text(implementFooter)
                 }
             }
 
-            attachmentsSection
+            FeedbackAttachmentsSection()
 
-            Section {
-                TextField("Your name", text: $presenter.reporterName)
-                    .textContentType(.givenName)
-                    .autocorrectionDisabled()
-            } header: {
-                Text("From")
-            } footer: {
-                Text("So I know who to follow up with. Remembered for next time.")
+            // Gone entirely once the host app knows who this is. The name it
+            // knows is better than the one someone would type into a form, and
+            // an editable field over the top of it would only invite a second,
+            // contradictory answer. What was sent stays visible under
+            // "Also sent" — hiding the field is not the same as hiding the fact.
+            if presenter.hostSuppliedName == nil {
+                Section {
+                    TextField("Your name", text: $presenter.reporterName)
+                        .textContentType(.givenName)
+                        .autocorrectionDisabled()
+                } header: {
+                    Text("From")
+                } footer: {
+                    Text("So I know who to follow up with. Remembered for next time.")
+                }
             }
 
             contextSection
 
             Section {
-                Button("Your feedback") {
+                Button("Your previous feedback") {
                     presenter.replaceSheet(with: .history)
                 }
             }
@@ -130,9 +152,27 @@ struct FeedbackView: View {
     }
 
     /// Only a bug or an idea is something that can be *built*. A general
-    /// remark isn't implementable, so the offer isn't made for it.
+    /// remark isn't implementable, so the offer isn't made for it. Kept even
+    /// though the picker no longer offers `general`, because a clarification
+    /// can be prefilled from a legacy row that was filed as one.
     private var offersImplementToggle: Bool {
         presenter.category == .bug || presenter.category == .idea
+    }
+
+    /// Two different promises, and the difference matters more than the words.
+    ///
+    /// Saying "straight to the workshop" to someone whose request is actually
+    /// going to sit in an approval queue is a promise the app can't keep, and
+    /// the reporter finds out by watching nothing happen. So the confident copy
+    /// appears only on a *successful* yes from `feedback_capabilities`; unknown,
+    /// offline and no all read the same, cautious way.
+    private var implementFooter: String {
+        if presenter.autoImplementAllowed {
+            return "Starts the work straight away instead of waiting for review. "
+                + "Follow along under Your previous feedback."
+        }
+        return "Asks for this to be built. I'll have a look and approve it before work starts. "
+            + "Follow along under Your previous feedback."
     }
 
     private var placeholder: String {
@@ -143,100 +183,32 @@ struct FeedbackView: View {
         }
     }
 
-    // MARK: - Attachments
+    /// Read aloud rather than drawn, so it can afford to be a whole question.
+    private var severityPrompt: String {
+        switch presenter.category {
+        case .bug: "How bad is it?"
+        case .idea, .general: "How big is it?"
+        }
+    }
 
-    private var attachmentsSection: some View {
+    // MARK: - Clarifying
+
+    /// Shown when this draft is an answer rather than a new report, so the
+    /// person typing can see the question without leaving the sheet to go and
+    /// find it again.
+    private func clarificationSection(_ question: String) -> some View {
         Section {
-            if let screenshot = presenter.autoScreenshot, let image = UIImage(data: screenshot) {
-                attachmentRow(
-                    image: image,
-                    title: "The screen you were on",
-                    subtitle: "Captured automatically",
-                    remove: { presenter.removeAutoScreenshot() }
-                )
+            VStack(alignment: .leading, spacing: 4) {
+                Label("Adding a detail", systemImage: "questionmark.bubble")
+                    .font(.footnote.weight(.semibold))
+                Text(question)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
-
-            ForEach(Array(presenter.userAttachments.enumerated()), id: \.offset) { index, data in
-                if let image = UIImage(data: data) {
-                    attachmentRow(
-                        image: image,
-                        title: "Attached image",
-                        subtitle: byteCount(data),
-                        remove: { presenter.removeUserAttachment(at: index) }
-                    )
-                }
-            }
-
-            if presenter.attachmentCount < 5 {
-                PhotosPicker(
-                    selection: $pickerItems,
-                    maxSelectionCount: 5 - presenter.attachmentCount,
-                    matching: .images,
-                    photoLibrary: .shared()
-                ) {
-                    Label("Add an image", systemImage: "photo.on.rectangle.angled")
-                }
-                .onChange(of: pickerItems) { _, items in
-                    guard !items.isEmpty else { return }
-                    Task {
-                        for item in items {
-                            if let data = try? await item.loadTransferable(type: Data.self) {
-                                await presenter.addUserAttachment(data)
-                            }
-                        }
-                        pickerItems = []
-                    }
-                }
-            }
-        } header: {
-            Text("Attachments")
+            .padding(.vertical, 2)
         } footer: {
-            if presenter.autoScreenshot != nil {
-                Text(
-                    "Password fields are blacked out automatically. "
-                        + "Remove the screenshot if you'd rather not send it."
-                )
-            }
+            Text("Sending this replaces the earlier report, so nothing gets answered twice.")
         }
-    }
-
-    private func attachmentRow(
-        image: UIImage,
-        title: String,
-        subtitle: String,
-        remove: @escaping () -> Void
-    ) -> some View {
-        HStack(spacing: 12) {
-            Image(uiImage: image)
-                .resizable()
-                .aspectRatio(contentMode: .fill)
-                .frame(width: 44, height: 60)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 6)
-                        .stroke(.separator, lineWidth: 0.5)
-                )
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                Text(subtitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Spacer()
-
-            Button(role: .destructive, action: remove) {
-                Image(systemName: "xmark.circle.fill")
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Remove attachment")
-        }
-    }
-
-    private func byteCount(_ data: Data) -> String {
-        ByteCountFormatter.string(fromByteCount: Int64(data.count), countStyle: .file)
     }
 
     // MARK: - Transparency
@@ -247,6 +219,13 @@ struct FeedbackView: View {
         Section {
             DisclosureGroup("Also sent") {
                 let context = DeviceContext.current()
+                // The name only appears here when the app supplied it, because
+                // that is the only case where the user didn't type it and might
+                // not know it is going along. When they typed it, the field
+                // above is already the answer.
+                if let name = presenter.hostSuppliedName {
+                    LabeledContent("Sending as", value: name)
+                }
                 LabeledContent("Device", value: context.modelName)
                 LabeledContent("System", value: context.os)
                 LabeledContent("App", value: appVersionLine)
@@ -281,7 +260,7 @@ struct FeedbackView: View {
                 .padding(.top, 8)
             // Right after sending is when someone most wants to see the queue
             // they just joined.
-            Button("Your feedback") {
+            Button("Your previous feedback") {
                 presenter.replaceSheet(with: .history)
             }
             .font(.subheadline)

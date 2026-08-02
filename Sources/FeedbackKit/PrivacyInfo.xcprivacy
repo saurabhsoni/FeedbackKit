@@ -35,11 +35,28 @@
 			</array>
 		</dict>
 		<dict>
-			<!-- The name the user types, if they type one. -->
+			<!-- The name the user types, or the one the host app supplies for a
+			     signed-in account via `.feedback(_:user:)`. -->
 			<key>NSPrivacyCollectedDataType</key>
 			<string>NSPrivacyCollectedDataTypeName</string>
 			<key>NSPrivacyCollectedDataTypeLinked</key>
 			<false/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+			</array>
+		</dict>
+		<dict>
+			<!-- The host app's own account id, when it passes one. Linked,
+			     unlike everything else here: it is an account identifier by
+			     definition, and it exists so a person's feedback history
+			     follows them onto a second device. -->
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypeUserID</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<true/>
 			<key>NSPrivacyCollectedDataTypeTracking</key>
 			<false/>
 			<key>NSPrivacyCollectedDataTypePurposes</key>
@@ -59,6 +76,18 @@
 			<key>NSPrivacyAccessedAPITypeReasons</key>
 			<array>
 				<string>7D9E.1</string>
+			</array>
+		</dict>
+		<dict>
+			<!-- FeedbackStatusWatcher keeps the seen-state snapshot and the
+			     unread set in UserDefaults, and the presenter caches the
+			     allowlist answer beside them. CA92.1 is the reason for an app
+			     reading and writing only its own container. -->
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>CA92.1</string>
 			</array>
 		</dict>
 	</array>

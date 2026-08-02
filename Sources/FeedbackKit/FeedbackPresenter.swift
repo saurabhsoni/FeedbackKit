@@ -45,10 +45,37 @@ public final class FeedbackPresenter {
     var userAttachments: [Data] = []
 
     var draft = ""
-    var category: FeedbackCategory = .general
+    var category: FeedbackCategory = .bug
+    var severity: FeedbackSeverity = .medium
     var implementRequested = false
     var reporterName: String
     var state: SubmissionState = .editing
+
+    /// The report this draft rewrites, when the reporter is answering a
+    /// question. Nil for everything else, and cleared by `reset()` — a stale
+    /// value here would quietly supersede an unrelated old report.
+    private(set) var clarifies: UUID?
+    /// The question that was asked, shown at the top of the draft so the person
+    /// answering can see what they are answering.
+    private(set) var clarifyingQuestion: String?
+
+    /// Who the host app says this is. Nil for an app with no accounts.
+    private(set) var user: FeedbackUser?
+
+    /// The name the host app supplied, if it supplied one. Its presence is what
+    /// removes the "Your name" field from the sheet.
+    var hostSuppliedName: String? {
+        user?.resolvedName
+    }
+
+    /// Whether an implement request from this person starts work immediately.
+    ///
+    /// A plain `Bool`, not an optional, because "we don't know yet" and "no"
+    /// have to produce the same sentence: promising someone their request goes
+    /// straight to the workshop and then queueing it for approval is a broken
+    /// promise, while saying it will be reviewed and then watching it start
+    /// immediately is a pleasant surprise. Only a successful `true` moves it.
+    private(set) var autoImplementAllowed: Bool
 
     enum SubmissionState: Equatable {
         case editing
@@ -62,9 +89,12 @@ public final class FeedbackPresenter {
     private let queue: FeedbackQueue
     private let transport: any FeedbackTransport
     private let shake = ShakeDetector()
+    private let capabilityCache: FeedbackCapabilityCache
 
     public init(config: FeedbackConfig, session: URLSession = .shared) {
         self.config = config
+        let cache = FeedbackCapabilityCache(appID: config.appID, defaults: .standard)
+        capabilityCache = cache
         let transport = SupabaseTransport(config: config, session: session)
         self.transport = transport
         queue = FeedbackQueue(transport: transport, appID: config.appID)
@@ -72,8 +102,12 @@ public final class FeedbackPresenter {
         let identity = FeedbackIdentity.load()
         self.identity = identity
         reporterName = identity.reporterName ?? ""
-        // The same install ID that goes out as `device_id` on every report is
-        // what reads them back — there is no second identifier.
+        // Last known answer, so the footer doesn't flip from one promise to the
+        // other a second after the sheet opens on someone who has seen it
+        // before. A cache miss reads false, which is the safe copy.
+        autoImplementAllowed = cache.lastKnown
+        // The install ID that goes out as `device_id` on every report is what
+        // reads them back; a signed-in account widens that to a second key.
         history = FeedbackHistoryStore(
             appID: config.appID,
             deviceID: identity.installID,
@@ -90,10 +124,51 @@ public final class FeedbackPresenter {
     func activate() {
         shake.start()
         Task { await queue.drain() }
+        Task { await refreshCapabilities() }
+        // Coming forward is the one moment we know the app is being looked at,
+        // which makes it the moment to find out whether anything moved while it
+        // wasn't. Deliberately quiet about failures — see `refreshInBackground`.
+        Task { await history.refreshInBackground() }
     }
 
     func deactivate() {
         shake.stop()
+    }
+
+    // MARK: - Identity
+
+    /// Takes the host app's word for who this is.
+    ///
+    /// Called on every change rather than once at construction, so signing in
+    /// or out mid-session is picked up without anything being rebuilt: the next
+    /// report carries the new account, and the history list re-scopes itself.
+    func updateUser(_ user: FeedbackUser?) {
+        guard user != self.user else { return }
+        self.user = user
+
+        // Migration, and it only ever runs one way. Once an app knows the
+        // person's name, that name replaces whatever was typed into the old
+        // field — which is now gone, so leaving a stale one would strand it.
+        if let name = user?.resolvedName {
+            FeedbackIdentity.adoptHostName(name)
+            reporterName = name
+        }
+
+        history.updateUser(user)
+        Task { await refreshCapabilities() }
+    }
+
+    /// Asks the backend whether this person is on the allowlist, and remembers
+    /// a yes. A failure of any kind — offline, first run, a 500 — leaves the
+    /// answer where it was rather than downgrading a cached yes on one bad
+    /// network moment.
+    private func refreshCapabilities() async {
+        guard let allowed = try? await transport.capabilities(
+            appID: config.appID, deviceID: identity.installID, userID: user?.resolvedID
+        ) else { return }
+
+        autoImplementAllowed = allowed
+        capabilityCache.remember(allowed)
     }
 
     // MARK: - Presenting
@@ -106,9 +181,14 @@ public final class FeedbackPresenter {
     public func present() {
         guard !isPresented else { return }
         pendingRoute = nil
+        pendingPrefill = nil
         autoScreenshot = ScreenshotCapture.capture()
         userAttachments = []
         draft = ""
+        category = .bug
+        severity = .medium
+        clarifies = nil
+        clarifyingQuestion = nil
         implementRequested = false
         state = .editing
         route = .compose
@@ -123,6 +203,46 @@ public final class FeedbackPresenter {
         guard !isPresented else { return }
         pendingRoute = nil
         route = .history
+    }
+
+    /// Opens the compose sheet as an answer to a question asked about an
+    /// earlier report, prefilled with what that report said.
+    ///
+    /// Called from inside the history sheet, so it takes the same hop through
+    /// "no sheet at all" as every other sheet swap — and that hop runs
+    /// `reset()`, which exists precisely to make sure no draft survives a
+    /// dismissal. The prefill therefore cannot be applied here: it would be
+    /// wiped a frame later. It is parked instead and applied on the far side,
+    /// which is the only place the compose sheet is about to appear with a
+    /// draft it is *supposed* to keep.
+    ///
+    /// No screenshot either. `present()` captures one because the app is behind
+    /// the sheet; here the history list is, and a picture of it tells nobody
+    /// anything.
+    public func presentClarification(of item: FeedbackHistoryItem) {
+        let prefill = Prefill(
+            body: item.body,
+            category: item.category,
+            severity: item.severity,
+            clarifies: item.id,
+            question: item.detail
+        )
+        guard isPresented else {
+            // Not on screen at all — nothing to hop through, so apply directly.
+            // An explicit request supersedes anything already queued, exactly
+            // as it does in `present()`.
+            pendingRoute = nil
+            pendingPrefill = nil
+            autoScreenshot = nil
+            userAttachments = []
+            implementRequested = false
+            state = .editing
+            apply(prefill)
+            route = .compose
+            return
+        }
+        pendingPrefill = prefill
+        replaceSheet(with: .compose)
     }
 
     public func dismiss() {
@@ -146,6 +266,13 @@ public final class FeedbackPresenter {
         reset()
         if let pendingRoute {
             self.pendingRoute = nil
+            // Before `route`, not after: the sheet's first render should
+            // already have the text in it, rather than showing an empty editor
+            // for a frame and then filling it in.
+            if let pendingPrefill {
+                self.pendingPrefill = nil
+                apply(pendingPrefill)
+            }
             route = pendingRoute
         }
     }
@@ -157,10 +284,33 @@ public final class FeedbackPresenter {
         )
     }
 
+    /// A draft handed across the "no sheet at all" hop in `replaceSheet(with:)`.
+    private struct Prefill {
+        let body: String
+        let category: FeedbackCategory
+        let severity: FeedbackSeverity
+        let clarifies: UUID
+        let question: String?
+    }
+
+    private var pendingPrefill: Prefill?
+
+    private func apply(_ prefill: Prefill) {
+        draft = prefill.body
+        category = prefill.category
+        severity = prefill.severity
+        clarifies = prefill.clarifies
+        clarifyingQuestion = prefill.question
+    }
+
     private func reset() {
         autoScreenshot = nil
         userAttachments = []
         draft = ""
+        category = .bug
+        severity = .medium
+        clarifies = nil
+        clarifyingQuestion = nil
         implementRequested = false
         state = .editing
     }
@@ -217,8 +367,11 @@ public final class FeedbackPresenter {
             buildNumber: Bundle.mainInfoString("CFBundleVersion"),
             body: body,
             category: category,
+            severity: severity,
             implementRequested: implementRequested,
             reporter: trimmedName.isEmpty ? nil : trimmedName,
+            userID: user?.resolvedID,
+            clarifies: clarifies,
             deviceID: identity.installID,
             device: DeviceContext.current(),
             attachments: attachments

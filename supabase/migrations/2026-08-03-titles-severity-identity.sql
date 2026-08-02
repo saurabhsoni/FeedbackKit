@@ -1,107 +1,50 @@
--- FeedbackKit — Supabase setup
+-- FeedbackKit 1.2.0 — titles, severity, account identity, clarification
 --
--- Run this ONCE per Supabase project, in the SQL Editor.
--- It is idempotent: re-running it is safe, and re-running it after a package
--- update is how an existing project picks up new columns.
+-- Delta migration for projects that already ran an earlier setup.sql.
+-- Idempotent: safe to re-run. New projects get all of this from setup.sql,
+-- which carries every statement below word for word — the only difference is
+-- that setup.sql folds these ADD COLUMNs into the one big ALTER TABLE that also
+-- carries the pre-1.2.0 columns.
 --
--- The security model, in one line: the key shipped inside the app can INSERT
--- feedback and read back only the reports it sent itself.
+-- What this adds, in one line: reports gain a one-line title and a severity, a
+-- person is now recognised by their *account* as well as by their install, and
+-- a report that came back "we don't understand this" can be replaced by a
+-- clearer one — none of which gives the shipped key a single new thing it can
+-- read or claim.
 --
--- It still cannot SELECT this table — not one row — cannot delete, and cannot
--- write a single triage column. The insert side is enforced by three
--- independent layers (RLS default-deny, column-level grants, and PostgREST
--- returning no body), so no single mistake exposes the data.
---
--- The read side is exactly one security-definer function,
--- `feedback_for_install(p_app_id, p_device_id, p_user_id)`. It returns only
--- rows matching a full-length install ID *or* a full-length account ID that the
--- caller supplies, and only a safe subset of columns — never `notes`, never
--- `reporter`, never `device`, never `device_id`, never `user_id`, never the
--- screenshot paths, and never another install's or account's rows.
---
--- Why a function rather than an RLS SELECT policy: the shipped key carries no
--- JWT, so a policy has no trusted claim to scope on. `using (device_id = <a
--- value the client supplied>)` is scoped by the caller, which is not scoped at
--- all — any caller could read every row by changing a query parameter. A
--- function takes the install ID as an argument and does the filtering *inside*,
--- where the caller cannot reach it. Knowing an install ID therefore lets you
--- read that install's own reports and nothing else: the same capability model
--- as an unguessable share link.
---
--- The account ID (`user_id`) joined that model in 1.2.0 and inherits its rule,
--- which is a constraint on the *host app*, not on this file: whatever you pass
--- as `user_id` must be opaque and unguessable — Sign in with Apple's `userID`,
--- a random account UUID — and never an email address, a username, or a
--- sequential integer. A guessable account ID is a guessable capability, and
--- would let a stranger read that account's reports back.
+-- Two things here are what a careless rewrite gets wrong, and neither of them
+-- fails at the point of the mistake, so both are spelled out where they appear:
+-- re-adding the `work_state` CHECK by name (section 1), and dropping BOTH old
+-- signatures of `feedback_for_install` before creating the new one (section 5).
 
 -- ---------------------------------------------------------------------------
--- 1. Table
+-- 1. Columns
 -- ---------------------------------------------------------------------------
 
-create table if not exists public.feedback (
-  id           uuid primary key default gen_random_uuid(),
-
-  -- Which app sent this. A slug pattern rather than a fixed IN-list so a new
-  -- app never needs a schema migration — it just picks a new slug.
-  app_id       text not null check (app_id ~ '^[a-z0-9][a-z0-9._-]{1,39}$'),
-  app_version  text not null check (char_length(app_version) <= 20),
-  build_number text          check (char_length(build_number) <= 20),
-
-  -- What the person actually said.
-  body         text not null check (char_length(body) between 1 and 4000),
-  -- 'general' stays in this list forever even though the picker stopped
-  -- offering it in 1.2.0: builds already in the field still send it, and
-  -- narrowing the constraint would make every legacy row unreadable and every
-  -- old client's insert fail. Never remove a value from this list.
-  category     text not null default 'general'
-                 check (category in ('bug', 'idea', 'general')),
-
+alter table public.feedback
   -- NOT the person's words: a one-line summary the runner writes so the inbox,
   -- a status notification and a commit message have something short to show.
   -- The app has no insert grant on it — a client-written title would land in
   -- the developer's inbox and in the reporter's own notifications, so it stays
   -- server-side like every other derived value.
-  title        text check (char_length(title) <= 80),
+  add column if not exists title text check (char_length(title) <= 80),
 
   -- How bad it is, from the reporter: 1 = most severe, 3 = least. The *words*
   -- shown for each number depend on the category (see `severity_label` in the
-  -- view, section 7); the number is what the runner's queue orders on.
+  -- view, section 6); the number is what the runner's queue orders on.
   -- Deliberately no column DEFAULT — the before-insert trigger in section 4
   -- fills in 2. A DEFAULT would only apply when the column is omitted
   -- entirely, and PostgREST sends an explicit null for any key present in the
   -- JSON body, so a client that posts `"severity": null` would slip past it.
-  severity     smallint check (severity between 1 and 3),
+  add column if not exists severity smallint check (severity between 1 and 3),
 
-  -- Who sent it. `reporter` is a display name — typed once by the person, or
-  -- handed over by the host app's account. `device_id` is a random per-install
-  -- UUID, NOT any Apple-provided device identifier: it exists only to group one
-  -- person's reports together. `user_id` is the host app's own stable account
-  -- ID, which is what lets someone still see their reports after reinstalling
-  -- or on a second device; it is null for apps that have no accounts.
-  --
-  -- `user_id` is also a read capability (section 5), so it must be opaque —
-  -- see the header. Length caps only; no format check, because every host app
-  -- has a different one.
-  reporter     text          check (char_length(reporter) <= 80),
-  device_id    text          check (char_length(device_id) <= 64),
-  user_id      text          check (char_length(user_id) <= 128),
-
-  -- Device/environment context, e.g.
-  -- {"model":"iPhone14,3","os":"26.4.1","locale":"en_IN","screen":"1284x2778"}
-  device       jsonb not null default '{}'::jsonb
-                 check (pg_column_size(device) <= 2048),
-
-  -- Triage. The app CANNOT write these — see the column grants below.
-  status       text not null default 'new'
-                 check (status in ('new', 'triaged', 'in_progress', 'done', 'wontfix')),
-  priority     smallint check (priority between 0 and 3),
-  notes        text,
-
-  -- "Start implementing this" — a request rather than a claim: the queue entry
-  -- it implies is created server-side by the trigger in section 4. The app can
-  -- ask for work to be done; it cannot claim any was done.
-  implement_requested boolean not null default false,
+  -- The host app's own stable account ID, which is what lets someone still see
+  -- their reports after reinstalling or on a second device; null for apps that
+  -- have no accounts. It is also a read capability (section 5), so it must be
+  -- opaque — Sign in with Apple's `userID`, a random account UUID — and never
+  -- an email address, a username or a sequential integer. Length cap only; no
+  -- format check, because every host app has a different one.
+  add column if not exists user_id text check (char_length(user_id) <= 128),
 
   -- The clarification chain, and the one place where the two directions of a
   -- relationship are deliberately in different hands. When a report comes back
@@ -117,77 +60,20 @@ create table if not exists public.feedback (
   -- deliberately does not: it is written by the trigger from `new.id`, so it is
   -- a real row by construction, and a second self-FK would only add an ON
   -- DELETE rule to reason about.
-  clarifies           uuid references public.feedback(id),
-  superseded_by       uuid,
-
-  -- Everything from here down is owned by the runner on the developer's
-  -- machine. The app has no column grant on any of it, exactly like the triage
-  -- columns above.
-  --
-  -- `unclear` = the classifier could not tell what to build and has asked the
-  -- reporter a question (it is in `work_note`); the row is parked, not failed.
-  -- `superseded` = a later report clarified this one; `superseded_by` points at
-  -- the replacement.
-  work_state          text
-                        check (work_state in ('queued', 'needs_approval', 'working',
-                                              'implemented', 'failed', 'declined',
-                                              'unclear', 'superseded')),
-
-  -- One sentence the runner writes for the *reporter* to read, e.g. "Added a
-  -- Clear button to the note sheet." Distinct from `notes`, which stays private
-  -- triage and is never returned to a client. For an `unclear` row this is the
-  -- question being asked, so it is written to be read by the reporter too.
-  work_note           text check (char_length(work_note) <= 500),
-
-  work_branch         text check (char_length(work_branch) <= 200),
-  work_commit         text check (char_length(work_commit) <= 64),
-  work_error          text check (char_length(work_error) <= 2000),
-  work_attempts       smallint not null default 0,
-  work_started_at     timestamptz,
-  work_updated_at     timestamptz,
-
-  -- The build number that first contains the fix. The client compares this
-  -- against its own CFBundleVersion to decide "implemented" vs "live for you",
-  -- which is why no separate `shipped` state is needed — and why this keeps
-  -- working unchanged if the app later ships via TestFlight or the App Store.
-  fixed_in_build      text check (char_length(fixed_in_build) <= 20),
-  installed_at        timestamptz,
-
-  created_at   timestamptz not null default now()
-);
-
--- On a project that already has the table, the block above does nothing at
--- all — `if not exists` skips the whole statement, columns included. So every
--- column added after the first release is repeated here, where re-running this
--- file actually applies it. Same names, same constraints as above; if you add a
--- column, add it in both places or existing projects silently miss it.
-alter table public.feedback
-  add column if not exists implement_requested boolean not null default false,
-  add column if not exists work_state text
-    check (work_state in ('queued', 'needs_approval', 'working',
-                          'implemented', 'failed', 'declined',
-                          'unclear', 'superseded')),
-  add column if not exists work_note text check (char_length(work_note) <= 500),
-  add column if not exists work_branch text check (char_length(work_branch) <= 200),
-  add column if not exists work_commit text check (char_length(work_commit) <= 64),
-  add column if not exists work_error   text check (char_length(work_error) <= 2000),
-  add column if not exists work_attempts smallint not null default 0,
-  add column if not exists work_started_at timestamptz,
-  add column if not exists work_updated_at timestamptz,
-  add column if not exists fixed_in_build text check (char_length(fixed_in_build) <= 20),
-  add column if not exists installed_at timestamptz,
-  -- Added in 1.2.0.
-  add column if not exists title text check (char_length(title) <= 80),
-  add column if not exists severity smallint check (severity between 1 and 3),
-  add column if not exists user_id text check (char_length(user_id) <= 128),
   add column if not exists clarifies uuid references public.feedback(id),
   add column if not exists superseded_by uuid;
 
--- The two new `work_state` values are the one thing the block above CANNOT
--- deliver to an existing project, and the failure is silent: `add column if not
--- exists` skips the entire clause when the column is already there, so its
--- widened inline CHECK is never applied and an insert of 'unclear' keeps being
--- rejected with a constraint violation that looks like a client bug.
+-- `work_state` gains 'unclear' (the classifier could not tell what to build and
+-- has asked the reporter a question, which is in `work_note`) and 'superseded'
+-- (a later report clarified this one; `superseded_by` points at the
+-- replacement).
+--
+-- This is the statement that silently does nothing if you write it the obvious
+-- way. `add column if not exists work_state text check (...)` — which is how
+-- setup.sql carries this column — skips the ENTIRE clause when the column is
+-- already there, inline CHECK included. The constraint would keep its old,
+-- narrower definition and an insert of 'unclear' would keep failing with a
+-- violation that reads like a client bug.
 --
 -- So drop the constraint by name and re-add it. Postgres names an inline column
 -- check `<table>_<column>_check`, which is where `feedback_work_state_check`
@@ -209,23 +95,11 @@ alter table public.feedback
 -- matches nothing on a second run.
 update public.feedback set severity = 2 where severity is null;
 
-create index if not exists feedback_app_created_idx
-  on public.feedback (app_id, created_at desc);
-
-create index if not exists feedback_new_idx
-  on public.feedback (created_at desc) where status = 'new';
-
--- The runner's claim query. Partial index so it stays tiny — it only ever
--- indexes the handful of rows actually waiting to be worked on.
-create index if not exists feedback_work_queue_idx
-  on public.feedback (created_at)
-  where implement_requested and work_state in ('queued', 'needs_approval');
-
--- Same waiting rows, in the order the runner actually claims them since 1.2.0:
--- most severe first, oldest first within a severity. Kept separate from the
--- index above rather than replacing it, because an index on (severity,
--- created_at) cannot produce created_at order on its own, and the plain
--- created_at scan is still what "what came in first" wants.
+-- The waiting rows in the order the runner actually claims them since 1.2.0:
+-- most severe first, oldest first within a severity. Kept alongside the
+-- existing `feedback_work_queue_idx` rather than replacing it, because an index
+-- on (severity, created_at) cannot produce created_at order on its own, and the
+-- plain created_at scan is still what "what came in first" wants.
 create index if not exists feedback_work_queue_severity_idx
   on public.feedback (severity, created_at)
   where implement_requested and work_state in ('queued', 'needs_approval');
@@ -239,21 +113,14 @@ create index if not exists feedback_untitled_idx
   on public.feedback (created_at) where title is null;
 
 -- ---------------------------------------------------------------------------
--- 2. Row-level security — insert-only for the key that ships in the app
+-- 2. Widen what the app may write — by exactly three columns
 -- ---------------------------------------------------------------------------
-
-alter table public.feedback enable row level security;
-
--- Start from zero rather than trusting Supabase's defaults.
-revoke all on public.feedback from anon, authenticated;
-
--- The app may set ONLY these columns. `status`, `priority`, `notes`, `id`,
--- `created_at`, `title`, `superseded_by` and every `work_*` column are simply
--- unreachable from a client — a malicious client cannot mark its own report
--- "done", backdate it, retire someone else's, or write the words a developer
--- and a notification will read. Grants are additive per column, so re-running
--- this widens an older project's grant by the new columns and leaves the rest
--- alone.
+--
+-- Grants are additive per column, so re-issuing the whole list is idempotent
+-- and states the intended end state in one place instead of leaving it implied
+-- by whatever earlier migrations happened to run. `title` and `superseded_by`
+-- are conspicuously absent and must stay that way: both are things the server
+-- concludes, not things a client gets to assert.
 --
 -- Why each of the writable ones is safe to hand a client:
 --
@@ -277,18 +144,6 @@ grant insert (app_id, app_version, build_number, body, category,
               screenshots, reporter, device_id, device, implement_requested,
               severity, user_id, clarifies)
   on public.feedback to anon;
-
-drop policy if exists "app can insert feedback" on public.feedback;
-create policy "app can insert feedback"
-  on public.feedback for insert to anon with check (true);
-
--- No SELECT / UPDATE / DELETE policy exists, and RLS denies by default, so all
--- three are refused. This is the line that makes the shipped key safe. Read-back
--- does not go through the table at all — see section 5.
-
--- Belt and braces: any table added to this schema later is not auto-exposed.
-alter default privileges for role postgres in schema public
-  revoke select, insert, update, delete on tables from anon, authenticated;
 
 -- ---------------------------------------------------------------------------
 -- 3. Who may start work without being asked — the actor allowlist
@@ -334,12 +189,13 @@ grant select, insert, update, delete on public.feedback_actors to service_role;
 -- 4. Insert triggers — what the database decides for itself
 -- ---------------------------------------------------------------------------
 --
--- Two triggers, because they need two different privilege levels and two
--- different times. The BEFORE one only edits the row being inserted, so it
--- needs nothing special. The AFTER one writes to a *different* row, which the
--- inserting client has no grant for at all — so it has to be SECURITY DEFINER,
--- which is exactly why its WHERE clause is load-bearing. Keeping them apart
--- keeps the privileged code down to five lines you can read in one go.
+-- The single before-insert trigger becomes two, because they need two different
+-- privilege levels and two different times. The BEFORE one only edits the row
+-- being inserted, so it needs nothing special. The AFTER one writes to a
+-- *different* row, which the inserting client has no grant for at all — so it
+-- has to be SECURITY DEFINER, which is exactly why its WHERE clause is
+-- load-bearing. Keeping them apart keeps the privileged code down to five lines
+-- you can read in one go.
 
 -- BEFORE INSERT: fill in what the client didn't send.
 --
@@ -446,17 +302,13 @@ create trigger feedback_after_insert
 -- row by changing a query parameter. A function takes the install ID as an
 -- argument and does the filtering *inside*, where the caller cannot reach it.
 --
--- The install ID is a random v4 UUID held in the app's keychain (see
--- FeedbackIdentity). Knowing one lets you read that install's own reports and
--- nothing else — the same capability model as an unguessable share link.
---
 -- Since 1.2.0 the scope is "this install OR this account", so that reinstalling
 -- or signing in on a second device no longer loses your history. The account ID
 -- joins the same capability model, which is why the host app must supply an
--- opaque one (see the header). The length floors below are what stop a short or
--- empty argument becoming a wildcard: 32 for an install ID (a UUID with or
--- without dashes), 16 for an account ID, which is the shortest thing that can
--- plausibly carry enough entropy to be a capability at all.
+-- opaque one. The length floors below are what stop a short or empty argument
+-- becoming a wildcard: 32 for an install ID (a UUID with or without dashes), 16
+-- for an account ID, which is the shortest thing that can plausibly carry
+-- enough entropy to be a capability at all.
 --
 -- Note what is NOT returned: `notes` (private triage), `reporter`, `device`,
 -- `device_id`, `user_id`, other installs' and accounts' rows, and the
@@ -618,50 +470,16 @@ revoke all on function public.feedback_capabilities(text, text, text) from publi
 grant execute on function public.feedback_capabilities(text, text, text) to anon;
 
 -- ---------------------------------------------------------------------------
--- 6. Screenshot storage — a private, write-only bucket
+-- 6. Triage view — surface the new columns for the developer
 -- ---------------------------------------------------------------------------
-
-insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
-values ('feedback-shots', 'feedback-shots', false, 5242880,
-        array['image/jpeg', 'image/png', 'image/heic'])
-on conflict (id) do update set
-  public             = false,
-  file_size_limit    = excluded.file_size_limit,
-  allowed_mime_types = excluded.allowed_mime_types;
-
--- `public = false` governs READS only. A private bucket still accepts an
--- anonymous INSERT when a policy allows it — which is exactly the asymmetry we
--- want: the app can upload, but nobody can browse or download without the
--- secret key.
-drop policy if exists "app can upload screenshots" on storage.objects;
-create policy "app can upload screenshots"
-  on storage.objects for insert to anon
-  with check (
-    bucket_id = 'feedback-shots'
-    -- First path segment must be a valid app slug, matching the table's rule.
-    and (storage.foldername(name))[1] ~ '^[a-z0-9][a-z0-9._-]{1,39}$'
-  );
-
--- Again: no SELECT policy, so the app cannot list or download anything. This is
--- why the read-back in section 5 returns a screenshot *count* and not paths —
--- paths would be useless to a client that cannot fetch them, and would leak the
--- bucket's layout for nothing.
-
--- ---------------------------------------------------------------------------
--- 7. Convenience view for triage (readable only with the secret key)
--- ---------------------------------------------------------------------------
---
--- Carries the work columns as well, so one query answers both "what came in"
--- and "what is the runner doing about it".
 --
 -- Dropped and recreated rather than `create or replace`d: replacing a view can
 -- only append columns to the end of the existing list, and `title` and
 -- `severity_label` belong next to the things they describe, not bolted on
--- after `installed_at`. Dropping takes the view's grants with it, which is safe
--- only because both are reissued afterwards — the revoke immediately below, the
--- service_role grant in section 8. Nothing else in the database depends on this
--- view: the developer, the runner and the /review-feedback skill all reach it
--- over PostgREST by name.
+-- after `installed_at`. Dropping is safe here because the grants are reissued
+-- immediately below and nothing else in the database depends on this view — it
+-- exists for the developer, the runner and the /review-feedback skill, all of
+-- which reach it over PostgREST by name.
 drop view if exists public.feedback_inbox;
 create view public.feedback_inbox as
   select id, created_at, app_id, category, status, priority,
@@ -696,26 +514,9 @@ create view public.feedback_inbox as
   from public.feedback
   order by created_at desc;
 
+-- DROP VIEW takes the old grants with it, so these are not decoration.
 revoke all on public.feedback_inbox from anon, authenticated;
-
--- ---------------------------------------------------------------------------
--- 8. Explicit grants for the secret key (service_role)
--- ---------------------------------------------------------------------------
---
--- Supabase normally auto-grants service_role full access to the public
--- schema. If you unchecked "Automatically expose new tables" when creating
--- the project (recommended — see README), that blocks service_role too, not
--- just anon/authenticated. Without this block, reading feedback back with the
--- secret key 403s with "permission denied for table feedback" even though the
--- key is correct — confirmed against a live project on 2026-07-29.
---
--- `update` is what lets both the developer and the runner write the triage and
--- `work_*` columns; nothing else in this file can write them. `feedback_actors`
--- gets its own grants in section 3, next to the table itself.
-
-grant select, update on public.feedback to service_role;
 grant select on public.feedback_inbox to service_role;
-grant select on storage.objects to service_role;
 
 -- Supabase reloads PostgREST's schema cache from a DDL event trigger, so this
 -- is usually redundant. It is here for the one case where it isn't: a function

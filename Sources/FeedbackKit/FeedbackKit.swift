@@ -26,7 +26,7 @@ public extension View {
     /// compilation.
     @available(iOSApplicationExtension, unavailable)
     func feedback(_ config: FeedbackConfig) -> some View {
-        modifier(FeedbackModifier(config: config))
+        modifier(FeedbackModifier(config: config, user: nil))
     }
 
     /// Convenience for `FeedbackConfig.fromInfoPlist(…)`, which is optional.
@@ -39,7 +39,45 @@ public extension View {
     @ViewBuilder
     func feedback(_ config: FeedbackConfig?) -> some View {
         if let config {
-            modifier(FeedbackModifier(config: config))
+            modifier(FeedbackModifier(config: config, user: nil))
+        } else {
+            onAppear {
+                assertionFailure(
+                    "FeedbackKit: no configuration found. Check Secrets.xcconfig "
+                        + "and that the Info.plist keys are being substituted."
+                )
+            }
+        }
+    }
+
+    /// The same, for an app that knows who is using it.
+    ///
+    /// ```swift
+    /// ContentView()
+    ///     .feedback(config, user: FeedbackUser(
+    ///         id: account?.userID,
+    ///         displayName: account?.fullName
+    ///     ))
+    /// ```
+    ///
+    /// Pass the *current* value on every render rather than a snapshot taken at
+    /// launch: the modifier pushes each change through, so signing in or out
+    /// mid-session re-scopes the history list and re-tags the next report
+    /// without anything being torn down and rebuilt.
+    ///
+    /// A non-empty `displayName` also removes the "Your name" field from the
+    /// sheet — the app already knows, so asking is just a chore with a worse
+    /// answer than the one it has.
+    @available(iOSApplicationExtension, unavailable)
+    func feedback(_ config: FeedbackConfig, user: FeedbackUser?) -> some View {
+        modifier(FeedbackModifier(config: config, user: user))
+    }
+
+    @available(iOSApplicationExtension, unavailable)
+    @ViewBuilder
+    func feedback(_ config: FeedbackConfig?, user: FeedbackUser?) -> some View {
+        if let config {
+            modifier(FeedbackModifier(config: config, user: user))
         } else {
             onAppear {
                 assertionFailure(
@@ -65,8 +103,11 @@ private struct FeedbackModifier: ViewModifier {
     @State private var presenter: FeedbackPresenter
     @Environment(\.scenePhase) private var scenePhase
 
-    init(config: FeedbackConfig) {
+    private let user: FeedbackUser?
+
+    init(config: FeedbackConfig, user: FeedbackUser?) {
         _presenter = State(initialValue: FeedbackPresenter(config: config))
+        self.user = user
     }
 
     func body(content: Content) -> some View {
@@ -87,10 +128,20 @@ private struct FeedbackModifier: ViewModifier {
                         FeedbackView()
                             .environment(presenter)
                     case .history:
+                        // The presenter goes in here too now: an `unclear` row
+                        // offers "Edit and resend", which sends the reader back
+                        // out to the compose sheet.
                         FeedbackHistoryView(store: presenter.history)
+                            .environment(presenter)
                     }
                 }
             )
+            // Ahead of the scene-phase handler on purpose. Both fire on the
+            // first pass with `initial: true`, and the capability check that
+            // `activate()` kicks off wants the account id already in hand.
+            .onChange(of: user, initial: true) { _, latest in
+                presenter.updateUser(latest)
+            }
             .onChange(of: scenePhase, initial: true) { _, phase in
                 // Drain the offline queue whenever the app comes forward. A
                 // background URLSession would be more thorough, but only the
@@ -162,12 +213,17 @@ public struct FeedbackHistoryButton<Label: View>: View {
         } label: {
             label
         }
+        // Unconditional: `badge(_ count:)` draws nothing at zero, so there is
+        // no state to branch on. This is the whole of the in-app half of status
+        // notifications — the notification itself is provisional and therefore
+        // quiet, so the badge is what a person actually notices.
+        .badge(presenter.history.unreadCount)
     }
 }
 
 @available(iOSApplicationExtension, unavailable)
 public extension FeedbackHistoryButton where Label == SwiftUI.Label<Text, Image> {
-    init(_ title: String = "Your Feedback", systemImage: String = "tray.full") {
+    init(_ title: String = "Your Previous Feedback", systemImage: String = "tray.full") {
         self.init { SwiftUI.Label(title, systemImage: systemImage) }
     }
 }
