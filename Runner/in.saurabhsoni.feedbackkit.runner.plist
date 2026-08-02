@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template. `Runner/install.sh` substitutes __HOME__ and copies this into
+  ~/Library/LaunchAgents/. Naming and log conventions follow the sibling job,
+  in.saurabhsoni.feedbackkit.check.
+
+  A LaunchAgent rather than a cloud routine for the same reason as that job:
+  it needs the secret Supabase key from this Mac's login keychain, and that key
+  never leaves this machine. It also needs the local Xcode toolchain and a
+  physically connected iPhone, neither of which exists in a cloud runner.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>in.saurabhsoni.feedbackkit.runner</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>__HOME__/Developer/FeedbackKit/Runner/feedback_runner.py</string>
+        <string>run</string>
+    </array>
+
+    <!-- Five minutes. The tick exits in about a second when the queue is
+         empty (one HTTPS round trip), and the lockfile means a long build
+         simply causes the next tick to return immediately. -->
+    <key>StartInterval</key>
+    <integer>300</integer>
+
+    <!-- Deliberately false: nothing should start building because you logged
+         in. The first tick after load is at most five minutes away anyway. -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <!-- launchd hands a job a minimal PATH that does NOT include Homebrew, so
+         xcodegen / swiftformat / swiftlint / xcbeautify would all be missing
+         and every verify would fail with a confusing "command not found".
+         ~/.local/bin is where the claude CLI lives. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>__HOME__/Library/Logs/feedbackkit-runner.log</string>
+    <key>StandardErrorPath</key>
+    <string>__HOME__/Library/Logs/feedbackkit-runner.log</string>
+
+    <!-- Builds are CPU-hungry and this Mac often has a second account logged
+         in concurrently (see /Users/Shared/MACHINE-NOTES.md). Run below normal
+         priority so an unattended build never makes the foreground account
+         feel stalled. -->
+    <key>Nice</key>
+    <integer>5</integer>
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>
